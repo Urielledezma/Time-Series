@@ -20,6 +20,8 @@
 # renv (ignore libs, keep lockfile)
 renv/library/
 renv/local/
+renv/staging/
+# renv/python/   # optional (only if you ever use reticulate)
 
 # Data outputs (generados)
 data/processed/
