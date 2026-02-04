@@ -1,0 +1,73 @@
+---
+title: "Descomposición de Series de Tiempo"
+author: "Francisco Uriel Ledezma Chávez"
+format: html
+editor: visual
+---
+
+## 
+
+```{r}
+library(tidyverse)
+library(fpp3) 
+```
+
+```{r}
+ur_cal <- tidyquant::tq_get(
+  x = "CAURN",
+  get = "economic.data",
+  from = "1976-01-01",
+  to = "2025-09-01"
+)
+
+ur_cal
+```
+
+```{r}
+ur_cal  |>  write.csv("ur_cal.csv")
+```
+
+```{r}
+ur_cal |>
+  model(
+    classical = classical_decomposition(y, type = "additive")
+  ) |>
+  
+components()
+```
+
+```{r}
+ur_cal
+```
+
+La tabla es una tibble y necesitamos que sea una tssible. Podemos convertirla utilizando la función as_tsibble(), y especificando el index
+
+```{r}
+ur_cal_tsb <- ur_cal |>
+  as_tsibble(index = date)
+
+ur_cal_tsb
+```
+
+La tsibble esta mal porque R cree que la serie tinee una periodicidad diaria y no mensual. Esto se controla con el **formato** de la fecha. Vamos a convertir la fecha a formato año-mes (*yearmonth*).
+
+```{r}
+ur_cal_tsb <- ur_cal |> 
+  mutate(date = yearmonth(date)) |>
+  as_tsibble(index = date)
+
+ur_cal_tsb
+```
+
+Descomposición STL
+
+```{r}
+ur_cal_dcmp <- ur_cal_tsb |>
+  model(
+    stl = STL(price)
+  )
+
+ur_cal_dcmp |>
+  components() |>
+  autoplot()
+```
