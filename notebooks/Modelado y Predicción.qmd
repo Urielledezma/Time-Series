@@ -1,0 +1,305 @@
+---
+title: "Modelado y Predicción"
+subtitle: "Importaciones en EEUU de autos mexicanos"
+date: 2026-02-18
+author: "Francisco Uriel Ledezma Chávez"
+format: 
+  html:
+    embed-resources: true
+editor: visual
+---
+
+# Modelado y Predicción
+
+```{r}
+# Cargar librerías necesarias
+# install.packages("tidyverse")
+# install.packages("fpp3")
+
+library(tidyverse)
+library(fpp3)
+```
+
+Vamos a modelar el gas, usando logaritmos + STL + SNaive + Drift.
+
+## Forma incorrecta
+
+```{r}
+aus_production |>
+  mutate(
+    log_gas = log(Gas)
+  ) |>
+  model(
+    stlf = decomposition_model(
+      STL(log_gas, robust = TRUE),
+      SNAIVE(season_year),
+      RW(season_adjust ~ drift())
+    )
+  ) |>
+  forecast(h = "5 years") |>
+  mutate(
+    .mean = exp(.mean)
+  ) |>
+  ggplot(aes(x = Quarter)) +
+  geom_line(data = aus_production, aes(y = Gas)) +
+  geom_line(aes(y = .mean), color = "blue")
+```
+
+## La forma correcta
+
+```{r}
+fc <- aus_production |>
+  model(
+    stlf = decomposition_model(
+      STL(log(Gas), robust = TRUE),
+      SNAIVE(season_year),
+      RW(season_adjust ~ drift())
+    )
+  ) |>
+  forecast(h = "5 years") |>
+  mutate(mediana = median(Gas))
+
+fc |>
+  autoplot() +
+  geom_line(aes(y = mediana), color = "blue", data = fc, linetype = "dashed")
+```
+
+# Ejercicio de prónostico - Importaciones de autos mexicanos a EEUU
+
+```{r}
+# Cargar datos de ventas
+
+imports <- tidyquant::tq_get(
+  x = "MAUINSA",
+  get = "economic.data",
+  from = "1993-01-01",
+  to = "2023-12-31"
+) |>
+  mutate(
+  date = yearmonth(date)
+  ) |>
+  as_tsibble(index = date)
+
+imports
+```
+
+1.- Se selecciona `get = "economic.data"` para obtener datos económicos desde el FRED. 2.- Se convierte la columna `date` a un formato de fecha mensual utilizando `yearmonth()`, porque nuestra serie es mensual.
+
+## Instrucciones
+
+Realizar un pronostico a 14 meses (hasta diciembre 2026). Realizar el flujo de pronostico completo.
+
+## Introducción
+
+```{r}
+#| message: false
+#| warning: false
+imports |>
+  autoplot(price)
+```
+
+## Train/Test
+
+Vamos a hacer pronósticos a 14 meses por lo que necesitamos dejar los últimos 14 meses como el conjunto de test.
+
+```{r}
+h = 14
+imports_train <- imports |>
+  slice(1:(n() - h))
+
+imports_train
+```
+
+## Visualización
+
+```{r}
+imports_train |>
+  autoplot(price)
+```
+
+```{r}
+imports_train |>
+  autoplot(log(price))
+```
+
+Parece que todavía no es completamente estable (ahora al inicio la varianza es mayor).
+
+Probemos con Box-Con
+
+```{r}
+imports_lambda <- imports_train |>
+  features(price, guerrero) |>
+  pull(lambda_guerrero)
+
+imports_lambda
+
+imports_train |>
+  autoplot(box_cox(price, imports_lambda))
+```
+
+Parece que mejora un poco.
+
+### Descomposición STL
+
+Vamos a separar la serie transformada usando STL.
+
+```{r}
+imports_train |>
+  model(
+    stl = STL(box_cox(price, imports_lambda) ~ season(window = "periodic"), robust = TRUE)
+) |>
+  components() |>
+autoplot()
+```
+
+## Especificación de modelos
+
+Primero vamos a probar los 4 modelos benchmark por separado, y posteriormente vamos a crear un modelo a partir de la descomposición que hicmos arriba.
+
+```{r}
+imports_fit <- imports_train |>
+  model(
+    media = MEAN(box_cox(price, imports_lambda)),
+    naive = NAIVE(box_cox(price, imports_lambda)),
+    snaive = SNAIVE(box_cox(price, imports_lambda)),
+    drift = RW(box_cox(price, imports_lambda) ~ drift())
+  )
+  
+imports_fit
+```
+
+## Evaluación
+
+```{r}
+imports_aug <- imports_fit |>
+  augment()
+
+imports_fit |>
+  select(media) |>
+  gg_tsresiduals()
+
+imports_aug |>
+  ggplot(aes(x = date, y = .innov)) +
+  geom_line() + 
+  facet_wrap(vars(.model), scales = "free_y") +
+  labs(title = "Innovaciones de los modelos benchmark")
+```
+
+## Prónostico a partir de descomposición
+
+```{r}
+imports_fit_stl <- imports_train |>
+  model(
+    stlf = decomposition_model (
+      STL(box_cox(price, imports_lambda), robust = TRUE),
+      SNAIVE(season_year),
+      RW(season_adjust ~ drift())
+    )
+  )
+
+imports_fit_stl
+```
+
+```{r}
+imports_fit_stl |>
+  gg_tsresiduals()
+```
+
+```{r}
+imports_fit_todos <- imports_train |>
+  model(
+    media = MEAN(box_cox(price, imports_lambda)),
+    naive = NAIVE(box_cox(price, imports_lambda)),
+    snaive = SNAIVE(box_cox(price, imports_lambda)),
+    drift = RW(box_cox(price, imports_lambda) ~ drift()),
+    stlf = decomposition_model (
+      STL(box_cox(price, imports_lambda), robust = TRUE),
+      SNAIVE(season_year),
+      RW(season_adjust ~ drift())
+    )
+  )
+
+imports_fit_todos
+```
+
+```{r}
+imports_fc_todos <- imports_fit_todos |>
+  forecast(h = 14)
+
+imports_fc_todos
+
+imports_fc_todos |>
+  autoplot(imports) +
+  facet_wrap(vars(.model), scales = "free_y")
+
+imports_fc_todos |>
+  autoplot(imports, level = NULL, linewidth = 1)
+```
+
+### Métricas de error (Accuracy)
+
+```{r}
+imports_fc_todos |>
+  accuracy(imports) |>
+  arrange(RMSE)
+```
+
+La serie es mensual y muestra un patrón estacional (ciclos anuales) además de cambios de nivel y tendencia a lo largo del tiempo. También se observan episodios de alta variabilidad, por lo que se aplicó una transformación Box-Cox (λ estimado con Guerrero) para estabilizar la varianza antes de modelar.
+
+Se compararon modelos benchmark (MEAN, NAIVE, SNAIVE y DRIFT) contra un modelo basado en descomposición (STLF), el cual separa la serie en componentes mediante STL. En STLF, la estacionalidad se modela con SNAIVE y el componente ajustado estacionalmente se modela con RW + drift, lo cual es adecuado cuando la tendencia no es constante.
+
+En el conjunto de prueba (14 meses), el modelo STLF obtuvo el menor error: RMSE = 10.63 y MAE = 8.16, superando a SNAIVE (RMSE = 11.72) y al resto de benchmarks. Por esta evidencia, se seleccionó STLF para el pronóstico final a 14 meses.
+
+```{r}
+fc <- imports |>
+  model(
+    stlf = decomposition_model(
+      STL(box_cox(price, imports_lambda), robust = TRUE),
+      SNAIVE(season_year),
+      RW(season_adjust ~ drift())
+    )
+  ) |>
+  forecast(h = 14)
+
+fc |>
+  autoplot(level = c(80, 95)) +
+  geom_hline(yintercept = median(imports$price, na.rm = TRUE),
+             linetype = "dashed")
+```
+
+#### Tests de Pormentau de Autocorrelación
+
+Para evaluar si el modelo seleccionado deja autocorrelación remanente en las innovaciones, se aplicaron pruebas Box-Pierce y Ljung-Box usando lag = 14, consistente con el horizonte mensual de pronóstico.
+
+```{r}
+imports_aug_stlf <- imports_fit_todos |>
+  select(stlf) |>
+  augment()
+```
+
+
+La prueba de Box-Pierce:
+
+```{r}
+imports_aug_stlf |>
+  features(.innov, box_pierce, lag = 14, dof = 0)
+```
+
+La prueba de Ljung-Box
+
+```{r}
+imports_aug_stlf |>
+  features(.innov, ljung_box, lag = 14, dof = 0)
+```
+
+## Conclusiones
+
+Se trabajó con la serie mensual **MAUINSA** (importaciones de autos mexicanos a EE.UU.) en el periodo 1993–2023, convirtiéndola a `tsibble` con índice mensual. Para evaluar el desempeño de los modelos se separó un conjunto de prueba de **14 meses**.
+
+La serie mostró cambios de varianza, por lo que se aplicó una transformación **Box-Cox** con λ estimado mediante **Guerrero**. Luego se utilizó una descomposición **STL** (robusta) para identificar estacionalidad y tendencia, y se construyeron modelos benchmark (Media, Naive, SNaive y Drift), además de un modelo basado en descomposición (**STLF**).
+
+En la comparación de desempeño sobre el conjunto de prueba, el mejor modelo fue **STLF**, al obtener el menor error: **RMSE = 10.63** y **MAE = 8.16**. El segundo mejor fue **SNaive** con **RMSE = 11.72**, mientras que **Naive** y **Drift** tuvieron los peores resultados (RMSE = 17.23 y 20.76, respectivamente). Esto sugiere que incorporar descomposición (STL) mejora la capacidad predictiva frente a benchmarks simples.
+
+Respecto al sesgo del pronóstico, el modelo **STLF** presentó **ME = -7.51**. En `accuracy()` de fpp3 el error se define como **(observado − pronosticado)**, por lo que un **ME negativo** indica que, en promedio, el modelo **tendió a sobreestimar** los valores reales en el periodo de prueba (el pronóstico quedó por encima del observado). Aun así, su desempeño global siguió siendo el mejor por sus menores RMSE y MAE.
+
+Con base en esta evidencia, se eligió **STLF** como modelo final y se generó el pronóstico a **14 meses**, reportando intervalos de predicción al **80% y 95%**. La línea punteada (mediana histórica) se agregó como referencia para interpretar el nivel esperado de la serie durante el horizonte pronosticado.
