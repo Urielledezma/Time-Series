@@ -1,11 +1,16 @@
 ---
 title: "Modelado y Predicción"
+<<<<<<< HEAD
 subtitle: "Importaciones en EEUU de autos mexicanos"
 date: 2026-02-18
 author: "Francisco Uriel Ledezma Chávez"
 format: 
   html:
     embed-resources: true
+=======
+author: "Francisco Uriel Ledezma Chávez"
+format: html
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 editor: visual
 ---
 
@@ -44,7 +49,11 @@ aus_production |>
   geom_line(data = aus_production, aes(y = Gas)) +
   geom_line(aes(y = .mean), color = "blue")
 ```
+<<<<<<< HEAD
 
+=======
+  
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## La forma correcta
 
 ```{r}
@@ -83,12 +92,22 @@ imports <- tidyquant::tq_get(
 imports
 ```
 
+<<<<<<< HEAD
 1.- Se selecciona `get = "economic.data"` para obtener datos económicos desde el FRED. 2.- Se convierte la columna `date` a un formato de fecha mensual utilizando `yearmonth()`, porque nuestra serie es mensual.
+=======
+1.- Se selecciona `get = "economic.data"` para obtener datos económicos desde el FRED.
+2.- Se convierte la columna `date` a un formato de fecha mensual utilizando `yearmonth()`, porque nuestra serie es mensual.
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 
 ## Instrucciones
 
 Realizar un pronostico a 14 meses (hasta diciembre 2026). Realizar el flujo de pronostico completo.
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## Introducción
 
 ```{r}
@@ -98,6 +117,12 @@ imports |>
   autoplot(price)
 ```
 
+<<<<<<< HEAD
+=======
+
+
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## Train/Test
 
 Vamos a hacer pronósticos a 14 meses por lo que necesitamos dejar los últimos 14 meses como el conjunto de test.
@@ -110,6 +135,12 @@ imports_train <- imports |>
 imports_train
 ```
 
+<<<<<<< HEAD
+=======
+
+
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## Visualización
 
 ```{r}
@@ -139,6 +170,10 @@ imports_train |>
 
 Parece que mejora un poco.
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ### Descomposición STL
 
 Vamos a separar la serie transformada usando STL.
@@ -152,6 +187,10 @@ imports_train |>
 autoplot()
 ```
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## Especificación de modelos
 
 Primero vamos a probar los 4 modelos benchmark por separado, y posteriormente vamos a crear un modelo a partir de la descomposición que hicmos arriba.
@@ -168,6 +207,10 @@ imports_fit <- imports_train |>
 imports_fit
 ```
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## Evaluación
 
 ```{r}
@@ -185,6 +228,10 @@ imports_aug |>
   labs(title = "Innovaciones de los modelos benchmark")
 ```
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## Prónostico a partir de descomposición
 
 ```{r}
@@ -244,11 +291,15 @@ imports_fc_todos |>
   arrange(RMSE)
 ```
 
+<<<<<<< HEAD
 La serie es mensual y muestra un patrón estacional (ciclos anuales) además de cambios de nivel y tendencia a lo largo del tiempo. También se observan episodios de alta variabilidad, por lo que se aplicó una transformación Box-Cox (λ estimado con Guerrero) para estabilizar la varianza antes de modelar.
 
 Se compararon modelos benchmark (MEAN, NAIVE, SNAIVE y DRIFT) contra un modelo basado en descomposición (STLF), el cual separa la serie en componentes mediante STL. En STLF, la estacionalidad se modela con SNAIVE y el componente ajustado estacionalmente se modela con RW + drift, lo cual es adecuado cuando la tendencia no es constante.
 
 En el conjunto de prueba (14 meses), el modelo STLF obtuvo el menor error: RMSE = 10.63 y MAE = 8.16, superando a SNAIVE (RMSE = 11.72) y al resto de benchmarks. Por esta evidencia, se seleccionó STLF para el pronóstico final a 14 meses.
+=======
+El mejor modelo parece ser el stlf. Vamos a utilizar este para hacer el pronóstico final.
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 
 ```{r}
 fc <- imports |>
@@ -269,6 +320,7 @@ fc |>
 
 #### Tests de Pormentau de Autocorrelación
 
+<<<<<<< HEAD
 Para evaluar si el modelo seleccionado deja autocorrelación remanente en las innovaciones, se aplicaron pruebas Box-Pierce y Ljung-Box usando lag = 14, consistente con el horizonte mensual de pronóstico.
 
 ```{r}
@@ -282,16 +334,30 @@ La prueba de Box-Pierce:
 
 ```{r}
 imports_aug_stlf |>
+=======
+La prueba de Box-Pierce:
+
+```{r}
+imports_aug |>
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
   features(.innov, box_pierce, lag = 14, dof = 0)
 ```
 
 La prueba de Ljung-Box
 
 ```{r}
+<<<<<<< HEAD
 imports_aug_stlf |>
   features(.innov, ljung_box, lag = 14, dof = 0)
 ```
 
+=======
+imports_aug |>
+  features(.innov, ljung_box, lag = 14, dof = 0)
+```
+
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
 ## Conclusiones
 
 Se trabajó con la serie mensual **MAUINSA** (importaciones de autos mexicanos a EE.UU.) en el periodo 1993–2023, convirtiéndola a `tsibble` con índice mensual. Para evaluar el desempeño de los modelos se separó un conjunto de prueba de **14 meses**.
@@ -303,3 +369,9 @@ En la comparación de desempeño sobre el conjunto de prueba, el mejor modelo fu
 Respecto al sesgo del pronóstico, el modelo **STLF** presentó **ME = -7.51**. En `accuracy()` de fpp3 el error se define como **(observado − pronosticado)**, por lo que un **ME negativo** indica que, en promedio, el modelo **tendió a sobreestimar** los valores reales en el periodo de prueba (el pronóstico quedó por encima del observado). Aun así, su desempeño global siguió siendo el mejor por sus menores RMSE y MAE.
 
 Con base en esta evidencia, se eligió **STLF** como modelo final y se generó el pronóstico a **14 meses**, reportando intervalos de predicción al **80% y 95%**. La línea punteada (mediana histórica) se agregó como referencia para interpretar el nivel esperado de la serie durante el horizonte pronosticado.
+<<<<<<< HEAD
+=======
+
+
+
+>>>>>>> e5d5e6252a40d6b5ffeee4d40bf5e9e9d13a1f4a
