@@ -277,7 +277,6 @@ imports_aug_stlf <- imports_fit_todos |>
   augment()
 ```
 
-
 La prueba de Box-Pierce:
 
 ```{r}
