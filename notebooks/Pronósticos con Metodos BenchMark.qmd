@@ -13,6 +13,7 @@ editor: visual
 library(tidyverse)
 library(fpp3)
 ```
+
 ```{r}
 aus_production |>
   autoplot(Gas)
@@ -155,7 +156,7 @@ gas_fc_todos |>
   autoplot(aus_production, level = NULL, linewidth = 1)
 ```
 
-### Métricas de error (Accurancy)
+### Métricas de error (Accuracy)
 
 ```{r}
 gas_fc_todos |>
@@ -189,5 +190,3 @@ La prueba de Ljung-Box
 gas_aug |>
   features(.innov, ljung_box, lag = 10, dof = 0)
 ```
-
-
