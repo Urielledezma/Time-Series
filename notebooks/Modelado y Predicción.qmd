@@ -83,7 +83,9 @@ imports <- tidyquant::tq_get(
 imports
 ```
 
-1.- Se selecciona `get = "economic.data"` para obtener datos económicos desde el FRED. 2.- Se convierte la columna `date` a un formato de fecha mensual utilizando `yearmonth()`, porque nuestra serie es mensual.
+1.- Se selecciona `get = "economic.data"` para obtener datos económicos desde el FRED. 
+
+2.- Se convierte la columna `date` a un formato de fecha mensual utilizando `yearmonth()`, porque nuestra serie es mensual.
 
 ## Instrucciones
 
