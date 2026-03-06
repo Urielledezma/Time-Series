@@ -1,0 +1,79 @@
+---
+title: "ARIMA"
+subtitle: "Series de tiempo"
+author:
+  - Francisco Uriel Ledezma Chávez
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-tools: true
+    df-print: paged
+    lang: es
+    number-depth: 3
+editor: visual
+---
+
+# ARIMA
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+library (tidyverse)
+library (fpp3)
+library (ggtime)
+```
+
+## ARIMA no Estacional
+
+```{r}
+us_change |> 
+  autoplot(Savings)
+```
+
+La serie parece ser estacionaria, vamos a comprobarlo con KPSS y con el número de diferencias necesarias para que la serie sea estacionaria.
+
+```{r}
+us_change |> 
+  features(Savings, unitroot_kpss)
+
+us_change |> 
+  features(Savings, unitroot_ndiffs)
+```
+
+```{r}
+us_change |> 
+  gg_tsdisplay(Savings, plot_type = "partial")
+```
+
+Esto sugiere ARIMA (1,0,1).
+
+## ARIMA Estacional
+
+```{r}
+savings_fit <- us_change |> 
+  model (
+    ARIMA_101 = ARIMA(Savings ~ pdq(1,0,1) + PDQ(0,0,0)),
+    ARIMA_002 = ARIMA(Savings ~ pdq(0,0,2) + PDQ(0,0,0)),
+    ARIMA_103 = ARIMA(Savings ~ pdq(1,0,3) + PDQ(1,0,1))
+  )
+
+savings_fit
+```
+
+Similar a ETS, podemos ver el reporte del modelo aquí (uno por uno).
+
+```{r}
+savings_fit |> 
+  select(ARIMA_101) |> 
+  report()
+```
+
+
+
