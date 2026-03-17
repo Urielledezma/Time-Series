@@ -25,55 +25,338 @@ editor: visual
 #| message: false
 #| warning: false
 
-library (tidyverse)
-library (fpp3)
-library (ggtime)
+library(tidyverse)
+library(fpp3)
 ```
 
-## ARIMA no Estacional
+## Introducción
+
+ARIMA significa **AutoRegressive Integrated Moving Average**. Un modelo ARIMA$(p,d,q)$ combina:
+
+* **AR(p)**: dependencia de valores pasados.
+* **I(d)**: número de diferencias necesarias para lograr estacionariedad.
+* **MA(q)**: dependencia de errores pasados.
+
+Los parámetros se interpretan así:
+
+* `p`: orden autorregresivo
+* `d`: número de diferencias
+* `q`: orden de media móvil
+
+Algunos casos particulares son:
+
+* ARIMA(0,0,0): ruido blanco
+* ARIMA(0,1,0): caminata aleatoria
+* ARIMA(p,0,0): modelo AR(p)
+* ARIMA(0,0,q): modelo MA(q)
+
+## Metodología general
+
+La lógica básica de trabajo con ARIMA es:
+
+1. Graficar la serie.
+2. Evaluar estacionariedad.
+3. Determinar cuántas diferencias se requieren.
+4. Revisar ACF y PACF para proponer candidatos.
+5. Ajustar varios modelos.
+6. Compararlos con AICc.
+7. Verificar residuos.
+8. Pronosticar.
+
+# ARIMA no estacional
+
+Usaremos la serie `Savings` del objeto `us_change`.
+
+## Visualización
 
 ```{r}
-us_change |> 
-  autoplot(Savings)
+us_change |>
+  autoplot(Savings) +
+  labs(
+    title = "Serie Savings",
+    y = "Savings"
+  )
 ```
 
-La serie parece ser estacionaria, vamos a comprobarlo con KPSS y con el número de diferencias necesarias para que la serie sea estacionaria.
+A primera vista, la serie parece estacionaria. Lo verificamos con KPSS y con el número de diferencias sugeridas.
+
+## Estacionariedad y diferencias necesarias
 
 ```{r}
-us_change |> 
+us_change |>
   features(Savings, unitroot_kpss)
 
-us_change |> 
+us_change |>
   features(Savings, unitroot_ndiffs)
 ```
 
+Si `unitroot_ndiffs()` sugiere `0`, no es necesario diferenciar y podemos trabajar con `d = 0`.
+
+## ACF y PACF
+
 ```{r}
-us_change |> 
+us_change |>
   gg_tsdisplay(Savings, plot_type = "partial")
 ```
 
-Esto sugiere ARIMA (1,0,1).
+La ACF y la PACF sirven como guía inicial:
 
-## ARIMA Estacional
+* PACF con corte claro: sugiere AR
+* ACF con corte claro: sugiere MA
+* ambas con decaimiento: sugiere ARMA
+
+## Modelos candidatos
 
 ```{r}
-savings_fit <- us_change |> 
-  model (
+savings_fit <- us_change |>
+  model(
     ARIMA_101 = ARIMA(Savings ~ pdq(1,0,1) + PDQ(0,0,0)),
     ARIMA_002 = ARIMA(Savings ~ pdq(0,0,2) + PDQ(0,0,0)),
-    ARIMA_103 = ARIMA(Savings ~ pdq(1,0,3) + PDQ(1,0,1))
+    ARIMA_300 = ARIMA(Savings ~ pdq(3,0,0) + PDQ(0,0,0)),
+    ARIMA_auto = ARIMA(Savings)
   )
 
 savings_fit
 ```
 
-Similar a ETS, podemos ver el reporte del modelo aquí (uno por uno).
+## Comparación por información
 
 ```{r}
-savings_fit |> 
-  select(ARIMA_101) |> 
+glance(savings_fit) |>
+  arrange(AICc) |>
+  select(.model, AIC, AICc, BIC)
+```
+
+En general, el criterio preferido es **AICc**: menor valor implica mejor equilibrio entre ajuste y complejidad.
+
+## Reporte del modelo elegido
+
+```{r}
+savings_fit |>
+  select(ARIMA_101) |>
   report()
 ```
+
+## Diagnóstico de residuos
+
+```{r}
+savings_fit |>
+  select(ARIMA_101) |>
+  gg_tsresiduals()
+```
+
+```{r}
+savings_fit |>
+  select(ARIMA_101) |>
+  augment() |>
+  features(
+    .innov,
+    ljung_box,
+    lag = 10,
+    dof = 2
+  )
+```
+
+En `ARIMA(1,0,1)`, los términos AR y MA consumen 2 grados de libertad, por eso usamos `dof = 2`.
+
+## Pronóstico
+
+```{r}
+savings_fit |>
+  select(ARIMA_101) |>
+  forecast(h = 8) |>
+  autoplot(us_change) +
+  labs(
+    title = "Pronóstico con ARIMA(1,0,1)",
+    y = "Savings"
+  )
+```
+
+# ARIMA estacional (SARIMA)
+
+Ahora usaremos una serie realmente estacional: `Beer` del conjunto `aus_production`, que es trimestral y presenta un patrón estacional claro.
+
+## Visualización de la serie estacional
+
+```{r}
+aus_production |>
+  autoplot(Beer) +
+  labs(
+    title = "Producción trimestral de cerveza en Australia",
+    y = "Megalitros"
+  )
+```
+
+Como la serie es positiva y presenta variación estacional, trabajaremos con su logaritmo.
+
+```{r}
+beer_data <- aus_production |>
+  mutate(
+    log_beer = log(Beer),
+    diff_seasonal = difference(log_beer, 4),
+    diff_both = difference(diff_seasonal)
+  )
+```
+
+## Diferenciación estacional y no estacional
+
+```{r}
+beer_data |>
+  features(log_beer, unitroot_nsdiffs)
+
+beer_data |>
+  features(diff_seasonal, unitroot_ndiffs)
+```
+
+Primero se evalúa si hace falta diferencia estacional con `unitroot_nsdiffs()`.
+Luego, sobre la serie ya diferenciada estacionalmente, se evalúa si también hace falta diferencia no estacional.
+
+## ACF y PACF de la serie diferenciada
+
+```{r}
+beer_data |>
+  gg_tsdisplay(diff_both, plot_type = "partial", lag_max = 20)
+```
+
+En series trimestrales:
+
+* la parte **no estacional** se observa en los primeros rezagos
+* la parte **estacional** se observa en los múltiplos de 4: 4, 8, 12, ...
+
+## Modelos SARIMA candidatos
+
+```{r}
+beer_fit <- aus_production |>
+  model(
+    SARIMA_011_011 = ARIMA(log(Beer) ~ pdq(0,1,1) + PDQ(0,1,1)),
+    SARIMA_110_011 = ARIMA(log(Beer) ~ pdq(1,1,0) + PDQ(0,1,1)),
+    SARIMA_111_011 = ARIMA(log(Beer) ~ pdq(1,1,1) + PDQ(0,1,1)),
+    SARIMA_auto = ARIMA(
+      log(Beer),
+      stepwise = FALSE,
+      approximation = FALSE
+    )
+  )
+
+beer_fit
+```
+
+## Comparación de modelos estacionales
+
+```{r}
+glance(beer_fit) |>
+  arrange(AICc) |>
+  select(.model, AIC, AICc, BIC)
+```
+
+## Reporte del mejor modelo
+
+```{r}
+beer_fit |>
+  select(SARIMA_auto) |>
+  report()
+```
+
+## Diagnóstico de residuos del SARIMA
+
+```{r}
+beer_fit |>
+  select(SARIMA_auto) |>
+  gg_tsresiduals(lag_max = 20)
+```
+
+```{r}
+beer_dof <- beer_fit |>
+  select(SARIMA_auto) |>
+  coefficients() |>
+  filter(str_detect(term, "^ar|^ma|^sar|^sma")) |>
+  nrow()
+
+beer_fit |>
+  select(SARIMA_auto) |>
+  augment() |>
+  features(
+    .innov,
+    ljung_box,
+    lag = 8,
+    dof = beer_dof
+  )
+```
+
+Aquí los grados de libertad se calculan dinámicamente como el número de coeficientes AR, MA, SAR y SMA estimados.
+
+## Pronóstico estacional
+
+```{r}
+beer_fit |>
+  select(SARIMA_auto) |>
+  forecast(h = 8) |>
+  autoplot(aus_production |> filter(year(Quarter) >= 1992)) +
+  labs(
+    title = "Pronóstico con SARIMA para Beer",
+    y = "Megalitros"
+  )
+```
+
+# STL + ARIMA vs SARIMA
+
+Otra forma de trabajar con estacionalidad es separar primero la componente estacional con STL y modelar la serie ajustada con ARIMA.
+
+## División entrenamiento-prueba
+
+```{r}
+beer_train <- aus_production |> filter(year(Quarter) <= 2004)
+beer_test  <- aus_production |> filter(year(Quarter) > 2004)
+```
+
+## Ajuste de ambos enfoques
+
+```{r}
+beer_comp_fit <- beer_train |>
+  model(
+    stl_arima = decomposition_model(
+      STL(log(Beer) ~ season(window = "periodic")),
+      ARIMA(season_adjust)
+    ),
+    sarima = ARIMA(
+      log(Beer),
+      stepwise = FALSE,
+      approximation = FALSE
+    )
+  )
+
+beer_comp_fit
+```
+
+## Comparación por precisión de pronóstico
+
+```{r}
+beer_comp_fit |>
+  forecast(h = nrow(beer_test)) |>
+  accuracy(beer_test) |>
+  select(.model, RMSE, MAE, MAPE, MASE) |>
+  arrange(RMSE)
+```
+
+## Pronósticos comparados
+
+```{r}
+beer_comp_fit |>
+  forecast(h = nrow(beer_test)) |>
+  autoplot(beer_train |> filter(year(Quarter) >= 1995), level = NULL) +
+  autolayer(beer_test, Beer, series = "Test") +
+  labs(
+    title = "STL + ARIMA vs SARIMA",
+    y = "Megalitros"
+  )
+```
+
+# Conclusiones
+
+* Un modelo ARIMA requiere algo más que ajustar órdenes: también debe verificarse la estacionariedad, comparar candidatos y revisar residuos.
+* En series no estacionales, la estructura `ARIMA(p,d,q)` suele ser suficiente.
+* En series estacionales, conviene usar **SARIMA** o bien un enfoque **STL + ARIMA**.
+* La elección final no debe basarse sólo en la intuición visual, sino también en **AICc**, diagnóstico de residuos y desempeño de pronóstico.
 
 
 

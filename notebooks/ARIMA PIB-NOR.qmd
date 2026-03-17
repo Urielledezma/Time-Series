@@ -1,0 +1,338 @@
+---
+title: "ARIMA"
+subtitle: "PIB de Noruega"
+author:
+  - Francisco Uriel Ledezma Chávez
+date: today
+format:
+  html:
+    theme: cosmo
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-tools: true
+    df-print: paged
+    lang: es
+    number-depth: 3
+editor: visual
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(fpp3)
+library(tidyquant)
+library(lubridate)
+library(stringr)
+```
+
+# Introducción
+
+En este documento se aplica la **metodología Box-Jenkins** para seleccionar el mejor modelo ARIMA para la serie del **PIB de Noruega**, correspondiente al grupo **MAF3074J**.
+
+La lógica de trabajo será la siguiente:
+
+1. Graficar la serie.
+2. Evaluar estacionariedad.
+3. Determinar el número de diferencias necesarias.
+4. Revisar la ACF y la PACF de la serie estacionaria.
+5. Ajustar varios modelos candidatos.
+6. Compararlos con AICc.
+7. Revisar los residuos.
+8. Generar un pronóstico de referencia.
+
+# Datos
+
+Para descargar la serie se utilizará `tidyquant::tq_get()` con una serie económica trimestral de PIB real para Noruega.
+
+```{r}
+nor_raw <- tidyquant::tq_get(
+  x = "CLVMNACSCAB1GQNO",
+  get = "economic.data",
+  from = "1978-01-01",
+  to = Sys.Date()
+)
+
+nor_data <- nor_raw |>
+  transmute(
+    Quarter = yearquarter(date),
+    y = price
+  ) |>
+  as_tsibble(index = Quarter) |>
+  filter(!is.na(y)) |>
+  mutate(
+    log_y = log(y)
+  )
+
+nor_data
+```
+
+Trabajaremos con el **logaritmo del PIB**, ya que esto ayuda a estabilizar la variabilidad y facilita la interpretación de cambios relativos.
+
+# PIB de Noruega
+
+## Paso 1. Visualización de la serie
+
+### Serie en niveles
+
+```{r}
+nor_data |>
+  autoplot(y) +
+  labs(
+    title = "PIB de Noruega",
+    y = "PIB"
+  )
+```
+
+### Serie en logaritmos
+
+```{r}
+nor_data |>
+  autoplot(log_y) +
+  labs(
+    title = "log(PIB) de Noruega",
+    y = "log PIB"
+  )
+```
+
+A simple vista, la serie presenta tendencia, por lo que **no parece estacionaria** en niveles.
+
+## Paso 2. Estacionariedad y diferencias
+
+### Diferenciación estacional
+
+Aunque la serie suele venir ajustada por estacionalidad, conviene verificar formalmente si hace falta una diferencia estacional adicional.
+
+```{r}
+nor_ns_tbl <- nor_data |>
+  features(log_y, unitroot_nsdiffs)
+
+nor_ns_tbl
+```
+
+### Diferenciación no estacional
+
+```{r}
+nor_kpss_tbl <- nor_data |>
+  features(log_y, unitroot_kpss)
+
+nor_D <- nor_ns_tbl$nsdiffs[[1]]
+
+if (nor_D == 0) {
+  nor_nd_tbl <- nor_data |>
+    features(log_y, unitroot_ndiffs)
+} else {
+  nor_nd_tbl <- nor_data |>
+    mutate(
+      y_seas = difference(log_y, lag = 4, differences = nor_D)
+    ) |>
+    features(y_seas, unitroot_ndiffs)
+}
+
+nor_kpss_tbl
+nor_nd_tbl
+```
+
+```{r}
+nor_d <- nor_nd_tbl$ndiffs[[1]]
+
+nor_D
+nor_d
+```
+
+Con base en estas pruebas, trabajaremos con:
+
+* diferencia estacional: `r nor_D`
+* diferencia no estacional: `r nor_d`
+
+Esto significa que el componente integrado del modelo debe justificarse con evidencia empírica. En particular, si `d = 2`, esa elección no proviene solo de la inspección visual, sino del resultado de las pruebas de raíz unitaria aplicadas a la serie transformada.
+
+### Serie transformada y diferenciada
+
+```{r}
+if (nor_D > 0) {
+  nor_aux <- nor_data |>
+    mutate(
+      y_temp = difference(log_y, lag = 4, differences = nor_D)
+    )
+} else {
+  nor_aux <- nor_data |>
+    mutate(
+      y_temp = log_y
+    )
+}
+
+if (nor_d > 0) {
+  nor_stat <- nor_aux |>
+    mutate(
+      y_stat = difference(y_temp, differences = nor_d)
+    )
+} else {
+  nor_stat <- nor_aux |>
+    mutate(
+      y_stat = y_temp
+    )
+}
+
+nor_stat |>
+  autoplot(y_stat) +
+  labs(
+    title = "Noruega: serie transformada y diferenciada",
+    y = "Serie estacionaria"
+  )
+```
+
+## Paso 3. ACF y PACF
+
+```{r}
+nor_stat |>
+  gg_tsdisplay(y_stat, plot_type = "partial", lag_max = 20)
+```
+
+La ACF y la PACF de la serie ya diferenciada sirven como guía inicial para proponer órdenes bajos en las partes AR y MA.
+
+## Paso 4. Modelos candidatos
+
+```{r}
+nor_fit <- nor_data |>
+  model(
+    ARIMA_011 = ARIMA(log_y ~ pdq(0, nor_d, 1) + PDQ(0, nor_D, 0)),
+    ARIMA_110 = ARIMA(log_y ~ pdq(1, nor_d, 0) + PDQ(0, nor_D, 0)),
+    ARIMA_111 = ARIMA(log_y ~ pdq(1, nor_d, 1) + PDQ(0, nor_D, 0)),
+    ARIMA_012 = ARIMA(log_y ~ pdq(0, nor_d, 2) + PDQ(0, nor_D, 0)),
+    ARIMA_210 = ARIMA(log_y ~ pdq(2, nor_d, 0) + PDQ(0, nor_D, 0)),
+    ARIMA_auto = ARIMA(
+      log_y ~ pdq(0:3, nor_d, 0:3) + PDQ(0:1, nor_D, 0:1),
+      stepwise = FALSE,
+      approximation = FALSE
+    )
+  )
+
+nor_fit
+```
+
+## Paso 5. Comparación de modelos
+
+```{r}
+nor_ic_tbl <- glance(nor_fit) |>
+  arrange(AICc) |>
+  select(.model, AIC, AICc, BIC)
+
+nor_ic_tbl
+```
+
+Usaremos **AICc** como criterio principal. El mejor modelo será el que presente el menor valor de AICc.
+
+### Reporte del modelo elegido
+
+```{r}
+nor_best_name <- nor_ic_tbl$.model[[1]]
+
+nor_best_fit <- nor_fit |>
+  select(all_of(nor_best_name))
+
+nor_best_name
+```
+
+```{r}
+nor_best_fit |>
+  report()
+```
+
+```{r}
+nor_report_lines <- capture.output(report(nor_best_fit))
+nor_model_line <- nor_report_lines[str_detect(nor_report_lines, "^Model:")]
+nor_model_desc <- str_trim(str_remove(nor_model_line[[1]], "^Model:\\s*"))
+
+nor_model_desc
+```
+
+```{r}
+nor_best_aicc <- nor_ic_tbl$AICc[[1]]
+nor_best_aicc
+```
+
+## Paso 6. Diagnóstico de residuos
+
+```{r}
+nor_best_fit |>
+  gg_tsresiduals(lag_max = 20)
+```
+
+Además, aplicamos la prueba de Ljung-Box descontando los grados de libertad consumidos por los coeficientes AR, MA, SAR y SMA estimados.
+
+```{r}
+nor_dof_best <- nor_best_fit |>
+  coefficients() |>
+  filter(str_detect(term, "^ar|^ma|^sar|^sma")) |>
+  nrow()
+
+nor_dof_best
+```
+
+```{r}
+nor_lb_tbl <- nor_best_fit |>
+  augment() |>
+  features(
+    .innov,
+    ljung_box,
+    lag = 8,
+    dof = nor_dof_best
+  )
+
+nor_lb_tbl
+```
+
+```{r}
+nor_lb_pvalue <- nor_lb_tbl$lb_pvalue[[1]]
+nor_lb_pvalue
+```
+
+Si el valor-p no es pequeño, entonces no hay evidencia fuerte de autocorrelación remanente y el modelo puede considerarse adecuado.
+
+### Nota metodológica
+
+Aunque la serie suele reportarse ajustada por estacionalidad, eso no implica necesariamente que desaparezca toda dependencia estacional. Por ello, si el mejor modelo conserva algún término estacional, su presencia debe interpretarse como parte de la dinámica residual que aún resulta útil modelar.
+
+## Paso 7. Pronóstico
+
+```{r}
+nor_best_fit |>
+  forecast(h = 8) |>
+  autoplot(nor_data) +
+  labs(
+    title = paste("Pronóstico con", nor_model_desc, "para el PIB de Noruega"),
+    y = "log PIB"
+  )
+```
+
+El pronóstico se presenta en **escala logarítmica**, ya que el modelo fue ajustado sobre `log(PIB)`.
+
+# Conclusión
+
+Siguiendo la metodología Box-Jenkins:
+
+* se graficó la serie y se identificó su comportamiento en niveles;
+* se evaluó la necesidad de diferenciación estacional y no estacional;
+* se revisaron la ACF y la PACF de la serie estacionaria;
+* se ajustaron varios modelos candidatos;
+* se compararon mediante **AICc**;
+* y se verificó que los residuos del mejor modelo fueran compatibles con ruido blanco.
+
+Por lo tanto, el modelo seleccionado para la serie del **PIB de Noruega** es:
+
+$$
+\text{`r nor_model_desc`}
+$$
+
+Este modelo fue el mejor dentro del conjunto de candidatos al presentar un **AICc de `r round(nor_best_aicc, 2)`**. Además, el diagnóstico residual mediante la prueba de Ljung-Box arrojó un **valor-p de `r round(nor_lb_pvalue, 4)`**, por lo que no existe evidencia fuerte de autocorrelación remanente en los residuos.
+
+En consecuencia, el modelo seleccionado ofrece un buen equilibrio entre ajuste, parsimonia y comportamiento residual, por lo que resulta adecuado para describir y pronosticar la dinámica del **PIB de Noruega**.
+
+
+
