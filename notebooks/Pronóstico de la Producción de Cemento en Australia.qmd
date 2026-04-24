@@ -1,0 +1,492 @@
+---
+title: "Pronóstico de la Producción de Cemento en Australia"
+subtitle: "Comparación de modelos ARIMA, ETS, Prophet y combinados"
+author:
+  - Francisco Uriel Ledezma Chávez
+date: today
+format:
+  html:
+    theme: cosmo
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-tools: true
+    df-print: paged
+    lang: es
+    number-depth: 3
+editor: visual
+---
+
+```{r}
+#| label: setup
+#| echo: false
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(fpp3)
+library(fable.prophet)
+library(plotly)
+
+theme_set(theme_minimal())
+```
+
+# Introducción
+
+En este documento se muestra cómo realizar una proyección de la producción de cemento en Australia utilizando distintos modelos de series de tiempo.
+
+La serie utilizada proviene de `aus_production` y contiene observaciones trimestrales de la variable `Cement`. Debido a que es una serie trimestral, la estacionalidad principal corresponde a un patrón anual de cuatro trimestres.
+
+Se comparan varios modelos:
+
+- STL + Random Walk con drift
+- ETS
+- ARIMA
+- Prophet
+- TSLM
+- Regresión dinámica
+- ARIMA con estacionalidad
+- ARIMA con términos de Fourier
+- Modelos combinados
+- Simulación bootstrap basada en STL
+
+# Cargar los datos
+
+```{r}
+#| label: cargar-datos
+
+cement <- aus_production |>
+  select(Quarter, Cement) |>
+  filter(!is.na(Cement))
+
+cement_train <- cement |>
+  filter(year(Quarter) <= 2005)
+
+cement_test <- cement |>
+  filter(year(Quarter) > 2005)
+
+cement
+cement_train
+cement_test
+```
+
+# Exploración inicial
+
+```{r}
+#| label: grafica-serie-original
+
+cement |>
+  autoplot(Cement) +
+  labs(
+    title = "Producción trimestral de cemento en Australia",
+    x = "Año",
+    y = "Cemento"
+  )
+```
+
+```{r}
+#| label: grafica-log-serie
+
+cement |>
+  autoplot(log(Cement)) +
+  labs(
+    title = "Logaritmo de la producción trimestral de cemento",
+    x = "Año",
+    y = "log(Cement)"
+  )
+```
+
+```{r}
+#| label: descomposicion-visual
+
+cement_train |>
+  model(
+    stl = STL(log(Cement) ~ season(window = "periodic"))
+  ) |>
+  components() |>
+  autoplot() +
+  labs(
+    title = "Descomposición STL de log(Cement)"
+  )
+```
+
+# Ajustar los modelos
+
+```{r}
+#| label: ajustar-modelos
+
+stlf <- decomposition_model(
+  STL(log(Cement) ~ season(window = "periodic")),
+  RW(season_adjust ~ drift())
+)
+
+cement_fit <- cement_train |>
+  model(
+    stlf = stlf,
+    ets = ETS(log(Cement)),
+    arima = ARIMA(log(Cement)),
+    prophet = prophet(
+      log(Cement) ~ trend() +
+        season(period = "year", type = "multiplicative")
+    ),
+    tslm = TSLM(log(Cement) ~ trend() + season()),
+    dyn_reg = ARIMA(log(Cement) ~ trend()),
+    season_arima = ARIMA(log(Cement) ~ trend() + season() + PDQ(0, 0, 0)),
+    fourier_arima = ARIMA(log(Cement) ~ trend() + fourier(K = 1) + PDQ(0, 0, 0))
+  )
+
+cement_fit
+```
+
+Notas importantes del bloque anterior:
+
+- `PDQ(0, 0, 0)` se usa dentro de modelos `ARIMA()`, no dentro de `prophet()`.
+- No se repite el nombre `harm_reg`. Cada modelo debe tener un nombre único.
+- Se usa `season_arima` para el modelo con estacionalidad clásica.
+- Se usa `fourier_arima` para el modelo con términos de Fourier.
+
+# Pronósticos
+
+```{r}
+#| label: pronosticos-modelos
+
+cement_fc <- cement_fit |>
+  forecast(h = nrow(cement_test))
+
+cement_fc
+```
+
+```{r}
+#| label: grafica-pronosticos-interactiva
+
+p <- cement_fc |>
+  autoplot(cement, level = NULL) +
+  labs(
+    title = "Pronósticos de producción de cemento",
+    x = "Año",
+    y = "Cemento",
+    colour = "Modelo"
+  )
+
+plotly::ggplotly(p, dynamicTicks = TRUE) |>
+  plotly::rangeslider() |>
+  plotly::layout(
+    yaxis = list(fixedrange = FALSE)
+  )
+```
+
+# Evaluación de precisión
+
+```{r}
+#| label: accuracy-modelos
+
+cement_accuracy <- cement_fc |>
+  accuracy(cement_test) |>
+  arrange(MAPE)
+
+cement_accuracy
+```
+
+```{r}
+#| label: accuracy-seleccionada
+
+cement_accuracy |>
+  select(.model, RMSE, MAE, MAPE, MASE, RMSSE)
+```
+
+# Modelo combinado manual
+
+Se construye un modelo combinado a partir del promedio simple de los modelos ajustados.
+
+```{r}
+#| label: modelo-combinado-manual
+
+cement_fit_combinado <- cement_fit |>
+  mutate(
+    combinado = (
+      stlf +
+        ets +
+        arima +
+        prophet +
+        tslm +
+        dyn_reg +
+        season_arima +
+        fourier_arima
+    ) / 8
+  )
+
+cement_fit_combinado
+```
+
+```{r}
+#| label: forecast-combinado-manual
+
+cement_fc_combinado <- cement_fit_combinado |>
+  select(combinado) |>
+  forecast(h = nrow(cement_test))
+
+cement_fc_combinado
+```
+
+```{r}
+#| label: grafica-combinado-manual
+
+p_combinado <- cement_fc_combinado |>
+  autoplot(cement, level = NULL) +
+  labs(
+    title = "Pronóstico del modelo combinado",
+    x = "Año",
+    y = "Cemento",
+    colour = "Modelo"
+  )
+
+plotly::ggplotly(p_combinado, dynamicTicks = TRUE) |>
+  plotly::rangeslider() |>
+  plotly::layout(
+    yaxis = list(fixedrange = FALSE)
+  )
+```
+
+```{r}
+#| label: accuracy-combinado-manual
+
+cement_fc_combinado |>
+  accuracy(cement_test) |>
+  arrange(MAPE)
+```
+
+# Modelo combinado con `combination_model()`
+
+Otra forma de construir un modelo combinado es usar directamente `combination_model()`.
+
+```{r}
+#| label: combination-model
+
+cement_fit2 <- cement_train |>
+  model(
+    combinado1 = combination_model(
+      ETS(log(Cement)),
+      ARIMA(log(Cement)),
+      prophet(
+        log(Cement) ~ trend() +
+          season(period = "year", type = "multiplicative")
+      )
+    )
+  )
+
+cement_fit2
+```
+
+```{r}
+#| label: forecast-combination-model
+
+cement_fc2 <- cement_fit2 |>
+  forecast(h = nrow(cement_test))
+
+cement_fc2
+```
+
+```{r}
+#| label: grafica-combination-model
+
+p_combinado2 <- cement_fc2 |>
+  autoplot(cement, level = NULL) +
+  labs(
+    title = "Pronóstico usando combination_model()",
+    x = "Año",
+    y = "Cemento",
+    colour = "Modelo"
+  )
+
+plotly::ggplotly(p_combinado2, dynamicTicks = TRUE) |>
+  plotly::rangeslider() |>
+  plotly::layout(
+    yaxis = list(fixedrange = FALSE)
+  )
+```
+
+```{r}
+#| label: accuracy-combination-model
+
+cement_fc2 |>
+  accuracy(cement_test) |>
+  arrange(MAPE)
+```
+
+# Comparación final de modelos
+
+```{r}
+#| label: comparacion-final
+
+bind_rows(
+  cement_fc |>
+    accuracy(cement_test),
+  cement_fc_combinado |>
+    accuracy(cement_test),
+  cement_fc2 |>
+    accuracy(cement_test)
+) |>
+  arrange(MAPE) |>
+  select(.model, RMSE, MAE, MAPE, MASE, RMSSE)
+```
+
+# Bootstrap
+
+El procedimiento bootstrap se usa para generar nuevas series sintéticas a partir de la descomposición STL.
+
+Pasos generales:
+
+1. Transformar la serie con logaritmos.
+2. Descomponer la serie usando STL.
+3. Aplicar blocked bootstrap a los residuos de la descomposición.
+4. Generar nuevas series sintéticas.
+5. Ajustar modelos a las series simuladas.
+6. Obtener intervalos empíricos de pronóstico.
+
+## Descomposición STL para bootstrap
+
+```{r}
+#| label: stl-bootstrap
+
+cement_stl <- cement_train |>
+  model(
+    stl_boot = STL(
+      log(Cement) ~ season(window = "periodic"),
+      robust = TRUE
+    )
+  )
+
+cement_stl
+```
+
+```{r}
+#| label: componentes-stl-bootstrap
+
+cement_stl |>
+  components() |>
+  autoplot() +
+  labs(
+    title = "Componentes STL usados para bootstrap"
+  )
+```
+
+## Generar series sintéticas
+
+```{r}
+#| label: generar-series-bootstrap
+
+set.seed(123)
+
+cement_boot <- cement_stl |>
+  generate(
+    new_data = cement_train,
+    times = 100,
+    bootstrap_block_size = 8
+  )
+
+cement_boot
+```
+
+```{r}
+#| label: grafica-series-bootstrap
+
+cement_boot |>
+  autoplot(.sim, alpha = 0.25) +
+  autolayer(cement_train, log(Cement), colour = "black", linewidth = 1) +
+  labs(
+    title = "Series sintéticas generadas con blocked bootstrap",
+    x = "Año",
+    y = "log(Cement)"
+  )
+```
+
+## Ajustar modelos a las series sintéticas
+
+```{r}
+#| label: ajustar-bootstrap
+
+cement_boot_fit <- cement_boot |>
+  model(
+    arima_boot = ARIMA(.sim)
+  )
+
+cement_boot_fit
+```
+
+```{r}
+#| label: forecast-bootstrap
+
+cement_boot_fc <- cement_boot_fit |>
+  forecast(h = nrow(cement_test))
+
+cement_boot_fc
+```
+
+## Intervalos empíricos bootstrap
+
+Como el bootstrap fue aplicado sobre `log(Cement)`, se regresa a la escala original usando `exp()`.
+
+```{r}
+#| label: resumen-bootstrap
+
+cement_boot_intervalos <- cement_boot_fc |>
+  as_tibble() |>
+  mutate(Cement_boot = exp(.mean)) |>
+  group_by(Quarter) |>
+  summarise(
+    media = mean(Cement_boot, na.rm = TRUE),
+    lo_80 = quantile(Cement_boot, 0.10, na.rm = TRUE),
+    hi_80 = quantile(Cement_boot, 0.90, na.rm = TRUE),
+    lo_95 = quantile(Cement_boot, 0.025, na.rm = TRUE),
+    hi_95 = quantile(Cement_boot, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  as_tsibble(index = Quarter)
+
+cement_boot_intervalos
+```
+
+```{r}
+#| label: grafica-bootstrap-final
+
+p_boot <- cement |>
+  autoplot(Cement) +
+  geom_ribbon(
+    data = cement_boot_intervalos,
+    aes(x = Quarter, ymin = lo_95, ymax = hi_95),
+    alpha = 0.15,
+    inherit.aes = FALSE
+  ) +
+  geom_ribbon(
+    data = cement_boot_intervalos,
+    aes(x = Quarter, ymin = lo_80, ymax = hi_80),
+    alpha = 0.25,
+    inherit.aes = FALSE
+  ) +
+  geom_line(
+    data = cement_boot_intervalos,
+    aes(x = Quarter, y = media),
+    linewidth = 1,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "Pronóstico bootstrap basado en STL",
+    subtitle = "Intervalos empíricos al 80% y 95%",
+    x = "Año",
+    y = "Cemento"
+  )
+
+plotly::ggplotly(p_boot, dynamicTicks = TRUE) |>
+  plotly::rangeslider() |>
+  plotly::layout(
+    yaxis = list(fixedrange = FALSE)
+  )
+```
+
+# Conclusiones
+
+En este ejercicio se ajustaron diferentes modelos de pronóstico para la producción trimestral de cemento. La comparación mediante métricas como RMSE, MAE y MAPE permite identificar el modelo con mejor desempeño sobre el conjunto de prueba.
+
+Además, se construyeron modelos combinados y se aplicó un procedimiento bootstrap basado en STL para generar escenarios sintéticos y obtener intervalos empíricos de pronóstico.
