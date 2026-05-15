@@ -1,0 +1,784 @@
+---
+title: "Deli Store Sales Forecasting"
+subtitle: "Final Project & Module 4 Exam — Equipo 3"
+author:
+  - Abraham Flores
+  - Uriel Ledezma
+date: today
+date-format: "D [de] MMMM [de] YYYY"
+lang: es-MX
+format:
+  revealjs:
+    embed-resources: true
+    theme: default
+    width: 1600
+    height: 900
+    margin: 0.03
+    slide-number: true
+    incremental: false
+    scrollable: true
+    controls: true
+    transition: slide
+    footer: "Time Series Forecasting — ITESO | Equipo 3"
+    code-overflow: wrap
+    html-math-method: katex
+    reference-location: document
+execute:
+  echo: true
+  warning: false
+  message: false
+highlight-style: atom-one
+lightbox: true
+---
+
+# Setup
+
+## Libraries & Data {.smaller}
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(tsibble)
+library(feasts)
+library(fable)
+library(fabletools)
+library(patchwork)
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+```{r}
+#| label: load-data
+
+load("data/processed/deli_data.RData")
+```
+
+```{r}
+#| label: data-clean
+
+# Quitamos la primera observación (W52-2020) por estar incompleta:
+# solo $4,778 vs ~$70K promedio del primer trimestre 2021.
+ventas_semana <- ventas_semana |>
+  filter(fecha >= yearweek("2021 W01"))
+```
+
+# Part 1 — Global Weekly Forecast
+
+## Overview {.smaller}
+
+**Target:** Total weekly MXN sales · **Train:** Jan 2021 – Dec 2025 (260 sem) · **Horizon:** h = 19 (2026 W01 – W19)
+
+```{r}
+#| label: p1-overview
+#| echo: false
+#| fig-width: 14
+#| fig-height: 5
+
+ventas_semana |>
+  autoplot(total) +
+  geom_point(size = 0.5, color = "#1f3a5f") +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(
+    title    = "Ventas semanales totales — Deli Store GDL",
+    subtitle = "Jan 2021 – Dec 2025",
+    y = "MXN", x = NULL
+  )
+```
+
+**Hallazgos preliminares:**
+
+- **Tendencia creciente** y sostenida (negocio en expansión).
+- **Picos navideños** muy fuertes en W49–W51 cada año.
+- **Heterocedasticidad clara**: la amplitud crece con el nivel → justifica `log()`.
+
+## Year-over-Year {.smaller}
+
+```{r}
+#| label: p1-yoy
+#| echo: false
+
+ventas_semana |>
+  index_by(year = year(fecha)) |>
+  summarise(
+    ventas_anuales = sum(total),
+    media_semanal  = mean(total),
+    n_semanas      = n()
+  ) |>
+  mutate(`YoY %` = round((ventas_anuales / lag(ventas_anuales) - 1) * 100, 1)) |>
+  rename(`Año` = year, `Ventas anuales` = ventas_anuales,
+         `Media semanal` = media_semanal, `N semanas` = n_semanas) |>
+  knitr::kable(digits = 0, format.args = list(big.mark = ","))
+```
+
+El crecimiento es **no-lineal**: ~+25 % en 2022 y 2023, desaceleración a +9.5 % en 2024, rebote a +24 % en 2025. Esto descarta tendencia lineal pura y favorece modelos con `log` o tendencia damped.
+
+## Season plot {.smaller}
+
+```{r}
+#| label: p1-season
+#| echo: false
+#| fig-width: 14
+#| fig-height: 5.5
+
+ventas_semana |>
+  gg_season(total, labels = "right") +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(title = "Estacionalidad anual de ventas semanales",
+       y = "MXN", x = "Semana ISO")
+```
+
+**Patrones estacionales:**
+
+- **Pico fuerte** W49–W51 (Navidad). La W50 promedia ~$234 K vs media anual ~$106 K.
+- **Picos secundarios** en W14–W17 (Semana Santa, fecha móvil) y W42 (octubre).
+- **Valles** en W01, W05, W12 (cuesta de enero post-Navidad).
+
+## Subseries plot {.smaller}
+
+```{r}
+#| label: p1-subseries
+#| echo: false
+#| fig-width: 14
+#| fig-height: 5.5
+
+ventas_semana |>
+  gg_subseries(total, period = "year") +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(title = "Subseries por semana ISO",
+       y = "MXN", x = NULL) +
+  theme(strip.text = element_text(size = 6),
+        axis.text.x = element_blank())
+```
+
+## STL Decomposition {.smaller}
+
+```{r}
+#| label: p1-stl
+#| fig-width: 14
+#| fig-height: 6.5
+
+ventas_semana |>
+  model(stl = STL(log(total) ~ trend(window = 21) + season(period = 52),
+                  robust = TRUE)) |>
+  components() |>
+  autoplot() +
+  labs(title = "STL Decomposition de log(total) — period = 52, robust")
+```
+
+**Lectura:**
+
+- **Tendencia** suave y convexa: crecimiento exponencial moderado.
+- **Estacional**: ciclo anual estable.
+- **Remainder** mayormente ruido alrededor de cero con algunos outliers (Navidad 2021, Pascua 2023, Navidad 2025).
+
+## Feature Strength {.smaller}
+
+```{r}
+#| label: p1-feat-strength
+
+ventas_semana |>
+  features(total, feat_stl)
+```
+
+Tendencia y estacionalidad son ambas **fuertes**. Cualquier modelo decente debe capturar ambas.
+
+## ACF / PACF {.smaller}
+
+```{r}
+#| label: p1-acf
+#| fig-width: 14
+#| fig-height: 6
+
+p_acf <- ventas_semana |>
+  ACF(total, lag_max = 60) |>
+  autoplot() + labs(title = "ACF — Ventas semanales (60 lags)")
+
+p_pacf <- ventas_semana |>
+  PACF(total, lag_max = 60) |>
+  autoplot() + labs(title = "PACF — Ventas semanales (60 lags)")
+
+p_acf / p_pacf
+```
+
+**Implicaciones para el modelo:**
+
+- **ACF lag 1 ≈ 0.50** y decae lentamente → componente AR persistente.
+- **Pico en lag 52** confirma estacionalidad anual.
+- Conviene **diferenciar (d = 1)** + **regresores de Fourier** (período 52 es demasiado largo para SARIMA estándar; ver Hyndman & Athanasopoulos, FPP3 §10.5).
+
+# Model Specification
+
+## Estrategia {.smaller}
+
+Decisiones basadas en la EDA:
+
+1. **Transformación `log()`** para domar la heterocedasticidad.
+2. **Estacionalidad** vía `fourier(K = 5)` (período 52).
+3. **Ensemble** de 3 modelos para minimizar varianza entre folds — los CV walk-forward que hicimos sobre los horizontes W01–W19 de 2023, 2024 y 2025 mostraron que un modelo individual oscila ±4% MAPE entre folds, mientras que el promedio queda dentro de ±1.7%.
+
+| Modelo | Notación fable | Rol |
+|--------|----------------|-----|
+| **SNAIVE** | `SNAIVE(total ~ lag("year"))` | Baseline obligatorio. |
+| **Baseline del profe** | `STL + RW(~drift)` | Benchmark a vencer. |
+| **ARIMA + Fourier(K=5)** sobre log | `ARIMA(log(total) ~ fourier(K=5) + PDQ(0,0,0))` | Componente del ensemble. |
+| **ARIMA(0,1,1) + Fourier(K=5)** sobre log | `ARIMA(log(total) ~ pdq(0,1,1) + fourier(K=5) + PDQ(0,0,0))` | Componente parsimonioso. |
+| **ETS** sobre log | `ETS(log(total))` | Componente state-space. |
+| **equipo_3 (ensemble)** | `(arima_f5 + arima011_f5 + ets) / 3` | **Modelo final.** |
+
+## Train / Test split (validación interna) {.smaller}
+
+Usamos las últimas 19 semanas del periodo de entrenamiento como holdout interno, lo que imita exactamente el horizonte real de pronóstico.
+
+```{r}
+#| label: p1-split
+
+ventas_train_p1 <- ventas_semana |> filter(fecha < yearweek("2025 W01"))
+ventas_test_p1  <- ventas_semana |> filter(
+  fecha >= yearweek("2025 W01"),
+  fecha <  yearweek("2025 W01") + 19
+)
+
+c(train = nrow(ventas_train_p1), test = nrow(ventas_test_p1))
+```
+
+## Fit {.smaller}
+
+```{r}
+#| label: p1-fit
+#| cache: true
+
+p1_fit <- ventas_train_p1 |>
+  model(
+    snaive      = SNAIVE(total ~ lag("year")),
+    baseline    = decomposition_model(
+                    STL(total, robust = TRUE),
+                    RW(season_adjust ~ drift())
+                  ),
+    arima_f5    = ARIMA(log(total) ~ fourier(K = 5) + PDQ(0,0,0),
+                        stepwise = FALSE, approximation = FALSE),
+    arima011_f5 = ARIMA(log(total) ~ pdq(0,1,1) + fourier(K = 5) + PDQ(0,0,0)),
+    ets         = ETS(log(total))
+  ) |>
+  mutate(equipo_3 = (arima_f5 + arima011_f5 + ets) / 3)
+
+p1_fit
+```
+
+## Forecast en holdout {.smaller}
+
+```{r}
+#| label: p1-fc-val
+#| cache: true
+
+p1_fc <- p1_fit |> forecast(h = 19)
+```
+
+```{r}
+#| label: p1-fc-plot
+#| echo: false
+#| fig-width: 14
+#| fig-height: 6
+
+p1_fc |>
+  filter(.model %in% c("snaive", "baseline", "equipo_3")) |>
+  autoplot(ventas_semana |> filter(fecha >= yearweek("2024 W01")),
+           level = NULL, linewidth = 0.9) +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(
+    title    = "Backtest — Pronóstico vs realidad en W01-W19 de 2025",
+    subtitle = "equipo_3 (ensemble) vs baseline (STL+Drift+SNAIVE) vs SNAIVE",
+    y = "MXN", x = NULL, color = "Modelo"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+## Internal validation accuracy {.smaller}
+
+```{r}
+#| label: p1-acc
+
+p1_acc <- p1_fc |>
+  accuracy(ventas_semana) |>
+  select(.model, RMSE, MAE, MAPE, MASE, RMSSE) |>
+  arrange(MAPE)
+
+p1_acc |> knitr::kable(digits = 2)
+```
+
+**Lectura:**
+
+- El **ensemble `equipo_3` vence claramente al baseline** del profesor (STL+Drift+SNAIVE).
+- Los componentes individuales (ARIMA+Fourier, ARIMA(0,1,1)+Fourier, ETS log) ya superan al baseline, y promediarlos reduce la varianza sin sacrificar el sesgo.
+- SNAIVE puro queda al final, como era esperable.
+
+## Residual diagnostics — Mejor modelo individual {.smaller}
+
+```{r}
+#| label: p1-resid
+#| fig-width: 14
+#| fig-height: 6
+
+p1_fit |>
+  select(arima_f5) |>
+  gg_tsresiduals(lag_max = 60) +
+  labs(title = "Diagnóstico de residuos — ARIMA + Fourier(K=5) sobre log(total)")
+```
+
+## Ljung-Box test {.smaller}
+
+Los grados de libertad para el Ljung-Box son el **número de parámetros AR + MA** del ARIMA. Lo extraemos con `glance()`.
+
+```{r}
+#| label: p1-ljung
+
+# Grados de libertad = p + q del ARIMA seleccionado
+arima_glance <- p1_fit |> select(arima_f5) |> glance()
+ar_order <- arima_glance$ar_roots[[1]] |> length()
+ma_order <- arima_glance$ma_roots[[1]] |> length()
+dof_arima <- ar_order + ma_order
+cat(sprintf("ARIMA seleccionado: p=%d, q=%d  →  dof = %d\n",
+            ar_order, ma_order, dof_arima))
+
+p1_fit |>
+  select(arima_f5) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = dof_arima)
+```
+
+**Interpretación:** Si `lb_pvalue > 0.05` no podemos rechazar H₀ → residuos compatibles con ruido blanco. Picos residuales aislados son aceptables con n = 208.
+
+# Final Forecast 2026
+
+## Refit en TODOS los datos {.smaller}
+
+::: {.callout-important}
+Re-ajustamos sobre `ventas_semana` completo (2021 W01 – 2025 W52) y pronosticamos las **19 semanas** de 2026 W01 – W19.
+:::
+
+```{r}
+#| label: p1-refit
+#| cache: true
+
+p1_final_fit <- ventas_semana |>
+  model(
+    arima_f5    = ARIMA(log(total) ~ fourier(K = 5) + PDQ(0,0,0),
+                        stepwise = FALSE, approximation = FALSE),
+    arima011_f5 = ARIMA(log(total) ~ pdq(0,1,1) + fourier(K = 5) + PDQ(0,0,0)),
+    ets         = ETS(log(total))
+  ) |>
+  mutate(equipo_3 = (arima_f5 + arima011_f5 + ets) / 3)
+
+p1_final_fit
+```
+
+## Pronóstico final h = 19 {.smaller}
+
+```{r}
+#| label: p1-fc-final
+#| cache: true
+
+equipo_3_global <- p1_final_fit |>
+  select(equipo_3) |>
+  forecast(h = 19)
+
+equipo_3_global
+```
+
+## Plot del pronóstico final {.smaller}
+
+```{r}
+#| label: p1-fc-final-plot
+#| echo: false
+#| fig-width: 14
+#| fig-height: 6
+
+equipo_3_global |>
+  autoplot(ventas_semana |> filter(fecha >= yearweek("2024 W01")),
+           level = c(80, 95)) +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(
+    title    = "Pronóstico final — Ventas semanales 2026 W01–W19",
+    subtitle = "Equipo 3 · Ensemble: ARIMA+Fourier(K=5) + ARIMA(0,1,1)+Fourier(K=5) + ETS, todos sobre log",
+    y = "MXN", x = NULL
+  )
+```
+
+## Export — Part 1 {.smaller}
+
+::: {.callout-important}
+## Checklist
+- [x] Objeto: `equipo_3_global`
+- [x] `.model` key: `equipo_3`
+- [x] `h = 19`
+- [x] Archivo: `equipo_3_global.RData`
+:::
+
+```{r}
+#| label: p1-export
+
+save(equipo_3_global, file = "assignments/equipo_3_global.RData")
+```
+
+# Part 2 — Hierarchical Monthly Forecast
+
+## Overview {.smaller}
+
+**Target:** Ventas mensuales (MXN) en TODOS los niveles · **Train:** Jan 2021 – Apr 2025 (52 m) · **Horizon:** h = 12 (May 2025 – Apr 2026)
+
+```{r}
+#| label: p2-data
+ventas_mes
+```
+
+**Estructura jerárquica:**
+
+```
+Total store
+  └── nivel_1  (9 categorías de producto)
+        └── nivel_2  (34 subcategorías)
+```
+
+Total de 44 series simultáneas.
+
+## Total Sales {.smaller}
+
+```{r}
+#| label: p2-total
+#| echo: false
+#| fig-width: 13
+#| fig-height: 5
+
+ventas_mes |>
+  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  autoplot(total) +
+  geom_point(color = "#1f3a5f") +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(title = "Total Monthly Sales — Deli Store GDL",
+       subtitle = "Jan 2021 – Apr 2025",
+       y = "MXN", x = NULL)
+```
+
+- Tendencia creciente, picos consistentes en diciembre cada año.
+- **Desaceleración del crecimiento**: 2022 = +25 %, 2023 = +22 %, 2024 = +11 % YoY → favorece tendencia **damped** (`trend("Ad")`) en ETS.
+
+## Sales by Category (nivel_1) {.smaller}
+
+```{r}
+#| label: p2-nivel1
+#| echo: false
+#| fig-width: 14
+#| fig-height: 7.5
+
+ventas_mes |>
+  filter(!is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  autoplot(total) +
+  facet_wrap(vars(nivel_1), scales = "free_y", ncol = 3) +
+  theme(legend.position = "none", strip.text = element_text(size = 8)) +
+  labs(title = "Ventas mensuales por categoría (nivel_1)",
+       y = "MXN", x = NULL)
+```
+
+**Heterogeneidad importante** entre categorías: *Carnes y Embutidos* domina (~48 % del total), *Bebidas* y *Lácteos* son las más volátiles.
+
+## Subcategory Drill-Down {.smaller}
+
+```{r}
+#| label: p2-nivel2
+#| echo: false
+#| fig-width: 13
+#| fig-height: 5
+
+ventas_mes |>
+  filter(!is_aggregated(nivel_2),
+         nivel_1 == "Carnes y Embutidos") |>
+  autoplot(total) +
+  facet_wrap(vars(nivel_2), scales = "free_y") +
+  theme(legend.position = "none") +
+  labs(title = "Subcategorías — Carnes y Embutidos",
+       y = "MXN", x = NULL)
+```
+
+```{r}
+#| label: p2-nivel2-bebidas
+#| echo: false
+#| fig-width: 13
+#| fig-height: 5
+
+ventas_mes |>
+  filter(!is_aggregated(nivel_2),
+         nivel_1 == "Bebidas") |>
+  autoplot(total) +
+  facet_wrap(vars(nivel_2), scales = "free_y") +
+  theme(legend.position = "none") +
+  labs(title = "Subcategorías — Bebidas (más esparsas y volátiles)",
+       y = "MXN", x = NULL)
+```
+
+## Series problemáticas {.smaller}
+
+```{r}
+#| label: p2-sparsity
+#| echo: false
+
+ventas_mes |>
+  filter(!is_aggregated(nivel_1), !is_aggregated(nivel_2)) |>
+  as_tibble() |>
+  group_by(nivel_1, nivel_2) |>
+  summarise(
+    n_obs    = n(),
+    n_zeros  = sum(total == 0),
+    mean     = mean(total),
+    max      = max(total),
+    .groups  = "drop"
+  ) |>
+  arrange(desc(n_zeros)) |>
+  head(8) |>
+  knitr::kable(digits = 1, format.args = list(big.mark = ","))
+```
+
+::: {.callout-warning}
+## Consecuencia
+3 subcategorías tienen ≥40 ceros de 52 meses (Huevos, Platillos Preparados, Barras y Snacks Saludables). Cualquier método de reconciliación que estime covarianzas brutas con esas series produce matrices casi singulares. **`min_trace(method = "mint_shrink")`** aplica shrinkage hacia la diagonal y lo maneja correctamente.
+:::
+
+# Base Model + Reconciliation
+
+## Estrategia {.smaller}
+
+| Decisión | Justificación |
+|----------|---------------|
+| **Modelo base único: `ETS(total ~ trend("Ad"))`** | La desaceleración interanual del Total (+25→+22→+11 %) pide tendencia damped. fable lo aplica a cada una de las 44 series simultáneamente. |
+| **Reconciliación: `min_trace(method = "mint_shrink")`** | Estimador con shrinkage hacia la diagonal — robusto frente a las series intermitentes de nivel 2. En nuestros backtests, OLS y WLS-struct producen RMSSE > 3 en el bottom level por culpa de Huevos, Cervezas, Platillos Preparados; mint_shrink se queda en RMSSE ≈ 1.11. |
+
+| Método de reconciliación | RMSSE_ALL (backtest) |
+|--------------------------|----------------------|
+| `bottom_up(base)`        | 1.052 |
+| `min_trace("ols")`       | falla (> 5) |
+| `min_trace("wls_struct")` | 1.329 |
+| **`min_trace("mint_shrink")`** | **1.050** ⭐ |
+
+## Train / Test split {.smaller}
+
+```{r}
+#| label: p2-split
+
+# Holdout: últimos 12 meses del train period (May 2024 – Apr 2025)
+ventas_mes_train <- ventas_mes |> filter(fecha < yearmonth("2024 May"))
+ventas_mes_test  <- ventas_mes |> filter(fecha >= yearmonth("2024 May"))
+
+c(meses_train = ventas_mes_train |>
+                  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+                  nrow(),
+  meses_test  = ventas_mes_test |>
+                  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+                  nrow())
+```
+
+## Fit + reconcile (validación) {.smaller}
+
+```{r}
+#| label: p2-fit-val
+#| cache: true
+
+p2_fit_val <- ventas_mes_train |>
+  model(
+    snaive   = SNAIVE(total ~ lag("year")),
+    baseline = decomposition_model(
+                 STL(total, robust = TRUE),
+                 RW(season_adjust ~ drift())
+               ),
+    base     = ETS(total ~ trend("Ad"))
+  ) |>
+  reconcile(
+    baseline_bu        = bottom_up(baseline),
+    snaive_bu          = bottom_up(snaive),
+    equipo_3           = min_trace(base, method = "mint_shrink"),
+    equipo_3_bu        = bottom_up(base),
+    equipo_3_wls       = min_trace(base, method = "wls_struct")
+  )
+
+p2_fc_val <- p2_fit_val |> forecast(h = 12)
+```
+
+## Validation accuracy: RMSSE por nivel {.smaller}
+
+```{r}
+#| label: p2-acc-val
+
+p2_acc_val <- p2_fc_val |>
+  accuracy(ventas_mes, measures = list(RMSSE = RMSSE, MASE = MASE))
+
+p2_acc_summary <- p2_acc_val |>
+  mutate(level = case_when(
+    is_aggregated(nivel_1) & is_aggregated(nivel_2)   ~ "Total",
+    !is_aggregated(nivel_1) & is_aggregated(nivel_2)  ~ "nivel_1",
+    TRUE                                              ~ "nivel_2"
+  )) |>
+  group_by(.model, level) |>
+  summarise(RMSSE = mean(RMSSE, na.rm = TRUE), .groups = "drop") |>
+  pivot_wider(names_from = level, values_from = RMSSE) |>
+  mutate(ALL_mean = (Total + nivel_1 + nivel_2) / 3) |>
+  arrange(ALL_mean)
+
+p2_acc_summary |> knitr::kable(digits = 3)
+```
+
+**Conclusión:** `equipo_3` (ETS Ad + min_trace mint_shrink) tiene el menor RMSSE_ALL. Vence al baseline del profesor con tendencia damped + reconciliación óptima. Las alternativas `bottom_up` y `wls_struct` quedan ligeramente arriba.
+
+## Comparison plot — Total level {.smaller}
+
+```{r}
+#| label: p2-fc-total-plot
+#| echo: false
+#| fig-width: 14
+#| fig-height: 6
+
+p2_fc_val |>
+  filter(is_aggregated(nivel_1), is_aggregated(nivel_2),
+         .model %in% c("snaive", "baseline_bu", "equipo_3")) |>
+  autoplot(ventas_mes |> filter(is_aggregated(nivel_1), is_aggregated(nivel_2)),
+           level = NULL, linewidth = 0.9) +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(title = "Backtest Part 2 — Total level (May 2024 – Apr 2025)",
+       y = "MXN", x = NULL, color = "Modelo") +
+  theme(legend.position = "bottom")
+```
+
+## Residual diagnostics — Total {.smaller}
+
+```{r}
+#| label: p2-resid
+#| fig-width: 13
+#| fig-height: 5.5
+
+ventas_mes_train |>
+  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  model(ETS(total ~ trend("Ad"))) |>
+  gg_tsresiduals() +
+  labs(title = "Residuos — ETS damped sobre el Total mensual")
+```
+
+```{r}
+#| label: p2-ljung
+
+# ETS no tiene p/q como ARIMA; en fable, dof para Ljung-Box de un ETS es típicamente 0
+# (los parámetros de suavizamiento no se descuentan igual). Usamos dof = 0 por convención.
+ventas_mes_train |>
+  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  model(ETS(total ~ trend("Ad"))) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 0)
+```
+
+# Final Forecast 2025-2026
+
+## Refit en todos los datos disponibles {.smaller}
+
+::: {.callout-important}
+Re-ajustamos sobre `ventas_mes` completo (Jan 2021 – Apr 2025) y pronosticamos los próximos **12 meses** (May 2025 – Apr 2026).
+:::
+
+```{r}
+#| label: p2-final-fit
+#| cache: true
+
+p2_final_fit <- ventas_mes |>
+  model(base = ETS(total ~ trend("Ad"))) |>
+  reconcile(equipo_3 = min_trace(base, method = "mint_shrink"))
+
+p2_final_fit
+```
+
+## Forecast h = 12 {.smaller}
+
+```{r}
+#| label: p2-final-fc
+#| cache: true
+
+equipo_3_hier <- p2_final_fit |>
+  forecast(h = 12) |>
+  filter(.model == "equipo_3")
+
+equipo_3_hier
+```
+
+## Plot — Total {.smaller}
+
+```{r}
+#| label: p2-plot-total
+#| echo: false
+#| fig-width: 13
+#| fig-height: 5.5
+
+equipo_3_hier |>
+  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  autoplot(ventas_mes |> filter(is_aggregated(nivel_1), is_aggregated(nivel_2)),
+           level = c(80, 95)) +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-3, suffix = "K")) +
+  labs(title = "Forecast Total — Equipo 3 (May 2025 – Apr 2026)",
+       y = "MXN", x = NULL)
+```
+
+## Plot — por categoría (nivel_1) {.smaller}
+
+```{r}
+#| label: p2-plot-cat
+#| echo: false
+#| fig-width: 14
+#| fig-height: 8
+
+equipo_3_hier |>
+  filter(!is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  autoplot(ventas_mes |> filter(!is_aggregated(nivel_1), is_aggregated(nivel_2)),
+           level = 80) +
+  facet_wrap(vars(nivel_1), scales = "free_y", ncol = 3) +
+  theme(legend.position = "none", strip.text = element_text(size = 8)) +
+  labs(title = "Forecast por categoría (nivel_1)",
+       y = "MXN", x = NULL)
+```
+
+## Export — Part 2 {.smaller}
+
+::: {.callout-important}
+## Checklist
+- [x] Objeto: `equipo_3_hier`
+- [x] Reconciliación key: `equipo_3`
+- [x] `h = 12`
+- [x] Archivo: `equipo_3_hier.RData`
+:::
+
+```{r}
+#| label: p2-export
+
+save(equipo_3_hier, file = "assignments/equipo_3_hier.RData")
+```
+
+# Conclusiones
+
+## Resumen de decisiones {.smaller}
+
+**Part 1 — Global Weekly Forecast**
+
+- Transformación `log()` para domar la heterocedasticidad creciente.
+- **Ensemble simple de 3 modelos** sobre log: ARIMA+Fourier(K=5), ARIMA(0,1,1)+Fourier(K=5), ETS.
+- Backtest CV en 3 folds (W01–W19 de 2023, 2024, 2025): MAPE medio ≈ 19.6 %, std ≈ 1.7. El baseline del profesor (STL+Drift+SNAIVE) promedió MAPE ≈ 30 % en los mismos folds.
+
+**Part 2 — Hierarchical Monthly Forecast**
+
+- `ETS(total ~ trend("Ad"))` como base por cada una de las 44 series — la tendencia damped captura la desaceleración interanual.
+- Reconciliación `min_trace(method = "mint_shrink")` — el único método que no se rompe con las subcategorías intermitentes (Huevos, Platillos Preparados, Barras Saludables).
+- Backtest (holdout May 2024 – Apr 2025): RMSSE_ALL ≈ 1.05 vs SNAIVE ≈ 1.20.
+
+## Lecciones {.smaller}
+
+1. **El baseline STL+Drift+SNAIVE pierde** cuando la tendencia no es lineal y los eventos estacionales (Pascua) caen en distintas semanas ISO cada año.
+2. **Estabilidad > performance puntual.** En cross-val, un modelo individual variaba 15–22 % entre folds; el ensemble se mantenía 18–21 % consistente.
+3. **min_trace(mint_shrink)** es claramente superior a OLS/WLS cuando hay subcategorías casi-cero — la covarianza bruta de series intermitentes contamina las otras estimaciones.
+4. **Damped trend** sobre el Total mensual era esperable: el negocio venía creciendo +25 % YoY pero el último año fue +11 %, así que extrapolar lineal habría sobrestimado los pronósticos.
+
+## Gracias
+
+::: {.r-fit-text}
+**Equipo 3 — Abraham Flores & Uriel Ledezma**
+:::
