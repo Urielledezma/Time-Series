@@ -1,0 +1,282 @@
+---
+title: "Final Project"
+subtitle: "Deli Store Sales Forecasting"
+author: "Pablo Benavides Herrera"
+date: today
+format:
+  revealjs:
+    embed-resources: true
+    theme: default
+    width: 1600
+    height: 900
+    margin: 0.03
+    slide-number: true
+    incremental: false
+    scrollable: true
+    controls: true
+    transition: slide
+    footer: "Time Series Forecasting — ITESO | Final Project"
+    code-overflow: wrap
+    html-math-method: katex
+    reference-location: document
+execute:
+  echo: true
+  warning: false
+  message: false
+highlight-style: atom-one
+lightbox: true
+---
+
+# Setup
+
+## Libraries & Data
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(tsibble)
+library(feasts)
+library(fable)
+library(ggtime)
+library(fable.prophet)
+```
+
+
+```{r}
+#| label: load-data
+
+load("deli_data.RData")
+```
+
+# Part 1 - Global Store Forecast — Weekly Sales
+
+## Global Store Forecast — Weekly Sales
+
+Train: **Jan 2021 – Dec 2025** &nbsp;|&nbsp; Forecast horizon: **19 weeks** (2026 W01 – W19)
+
+```{r}
+#| label: p1-overview
+#| echo: false
+
+ventas_semana |>
+  autoplot(total) +
+  labs(
+    title    = "Weekly Total Sales — Deli Store GDL",
+    subtitle = "Training period: January 2021 – December 2025",
+    y        = "MXN",
+    x        = NULL
+  )
+```
+
+## Final Forecast — 2026
+
+:::{.callout-important}
+## Use the FULL training data here
+Refit your chosen model on all of `ventas_semana` (2021–2025). Do **not** use the internal split.
+:::
+
+```{r}
+#| label: p1-final-fit
+#| cache: true
+
+baseline_global <- ventas_semana |>
+  model(
+    baseline = decomposition_model(
+      STL(total, robust = TRUE),
+      RW(season_adjust ~drift())
+    )
+  ) |>
+  forecast(h = 19)             # 19 complete weeks: 2026 W01 – W19
+
+baseline_global
+```
+
+```{r}
+baseline_global |>
+  autoplot(ventas_semana)
+```
+
+
+## Export — Part 1
+
+:::{.callout-important}
+## Submission checklist
+
+- [ ] Object `equipo_X_global` is named with your Canvas team name
+- [ ] The key inside `model()` matches the object name
+- [ ] `h = 19` — do **not** change this
+- [ ] File name: `[team_name]_global.RData`
+:::
+
+```{r}
+#| label: p1-export
+#| eval: false
+
+save(baseline_global, file = "baseline_global.RData")
+```
+
+# Part 2 - Hierarchical Forecasting — Monthly Sales
+
+## Hierarchical Forecasting — Monthly Sales
+
+Train: **Jan 2021 – Apr 2025** &nbsp;|&nbsp; Forecast horizon: **12 months** (May 2025 – Apr 2026)
+
+```{r}
+#| label: p2-overview
+ventas_mes
+```
+
+:::{.callout-note}
+## Three-level hierarchy
+```
+Total store
+  └── nivel_1  (8 product categories)
+        └── nivel_2  (~30 subcategories)
+```
+- `is_aggregated(nivel_1) & is_aggregated(nivel_2)` → Total
+- `!is_aggregated(nivel_1) & is_aggregated(nivel_2)` → Category (nivel_1)
+- `!is_aggregated(nivel_1) & !is_aggregated(nivel_2)` → Subcategory (nivel_2) — the bottom level
+:::
+
+## Total Sales
+
+```{r}
+#| label: p2-total
+#| echo: false
+
+ventas_mes |>
+  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  autoplot(total) +
+  labs(
+    title    = "Total Monthly Sales — Deli Store GDL",
+    subtitle = "Training period: January 2021 – April 2025",
+    y        = "MXN", x = NULL
+  )
+```
+
+
+## Sales by Category
+
+```{r}
+#| label: p2-nivel1
+#| fig-height: 6
+#| echo: false
+
+ventas_mes |>
+  filter(!is_aggregated(nivel_1), is_aggregated(nivel_2)) |>
+  autoplot(total) +
+  facet_wrap(vars(nivel_1), scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Monthly Sales by Category (nivel_1)",
+    y     = "MXN", x = NULL
+  )
+```
+
+
+## Subcategory Drill-Down
+
+```{r}
+#| label: p2-nivel2
+#| echo: false
+
+ventas_mes |>
+  filter(
+    !is_aggregated(nivel_2),
+    nivel_1 == "Carnes y Embutidos"
+  ) |>
+  autoplot(total) +
+  facet_wrap(vars(nivel_2), scales = "free_y") +
+  theme(legend.position = "none") +
+  labs(
+    title = "Subcategories — Carnes y Embutidos", 
+    y     = "MXN", x = NULL
+  )
+```
+
+
+## Baseline Reconciliation
+
+:::{.callout-note}
+## Available reconciliation methods
+
+| Method | Description |
+|--------|-------------|
+| `bottom_up(base)` | Aggregate bottom-level forecasts upward |
+| `top_down(base)` | Disaggregate top-level forecasts downward |
+| `middle_out(base)` | Reconcile forecasts at the middle level |
+| `min_trace(method = "ols")` | Minimise trace of forecast error covariance (OLS weights) |
+| `min_trace(method = "wls_struct")` | WLS with structural scaling |
+| `min_trace(method = "mint_shrink")` | MinT with shrinkage estimator — recommended when many series |
+:::
+
+```{r}
+ventas_mes_fit <- ventas_mes |> 
+  model(
+    stlf = decomposition_model(
+      STL(total, robust = TRUE),
+      RW(season_adjust ~ drift())
+    )
+  ) |> 
+  reconcile(baseline = bottom_up(stlf))
+
+baseline_hier <- ventas_mes_fit |> 
+  forecast(h = "1 year") |> 
+  filter(.model == "baseline")
+```
+
+## Baseline Forecasts
+
+```{r}
+baseline_hier |> 
+  filter(is_aggregated(nivel_1), is_aggregated(nivel_2)) |> 
+  autoplot(ventas_mes)
+
+baseline_hier |> 
+  filter(!is_aggregated(nivel_1), is_aggregated(nivel_2)) |> 
+  autoplot(ventas_mes) +
+  facet_wrap(vars(nivel_1), scales = "free_y", ncol = 3)
+
+baseline_hier |> 
+  filter(!is_aggregated(nivel_1), !is_aggregated(nivel_2)) |> 
+  autoplot(ventas_mes) +
+  facet_wrap(vars(nivel_2), scales = "free_y", ncol = 6)
+```
+```{r}
+ventas_train_accu <- ventas_mes_fit |>
+  select(-stlf) |> 
+  accuracy(
+    measures = list(RMSSE = RMSSE, MASE = MASE)
+  )
+
+ventas_train_accu
+
+ventas_train_accu |> 
+  group_by(.model) |> 
+  summarise(
+    RMSSE = mean(RMSSE),
+    MASE   = mean(MASE)
+  )
+```
+
+
+## Export — Part 2
+
+:::{.callout-important}
+## Submission checklist
+
+- [ ] Object `equipo_X_hier` is named with your Canvas team name
+- [ ] The reconciliation step key matches the object name (the `.model` column value)
+- [ ] `h = 12` — do **not** change this
+- [ ] File name: `[team_name]_hier.RData`
+:::
+
+```{r}
+#| label: p2-export
+#| eval: false
+
+save(baseline_hier, file = "baseline_hier.RData")   # ✏️ rename both occurrences
+```
+
+
